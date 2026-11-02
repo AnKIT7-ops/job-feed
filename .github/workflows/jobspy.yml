@@ -42,7 +42,7 @@ jobs:
         if: steps.fresh.outputs.skip != 'true'
         with:
           python-version: "3.11"
-          cache: pip
+          
 
       - name: Install JobSpy
         if: steps.fresh.outputs.skip != 'true'
