@@ -31,6 +31,7 @@ for track, term, sites in QUERIES:
         except Exception as e:
             print("ERR", term, loc, str(e)[:120]); continue
         for r in df.to_dict("records"):
+            r = {k: (None if isinstance(v, float) and v != v else v) for k, v in r.items()}  # NaN -> None
             where = f"{r.get('location') or ''} {'remote' if r.get('is_remote') else ''}"
             if not OK.search(where):
                 continue
