@@ -1,19 +1,74 @@
 name: jobspy-feed
+
 on:
   schedule:
-    - cron: "30 0 * * *"   # 06:00 IST daily, before the 8am pipeline run
+    - cron: "17 0 * * *"    # 05:47 IST, off-peak minute, main run
+    - cron: "47 1 * * *"    # 07:17 IST, backup run (skips if already done today)
+    - cron: "23 3 1 * *"    # monthly keepalive so GitHub never disables schedules
   workflow_dispatch:
+
 permissions:
   contents: write
+
+concurrency:
+  group: jobspy-feed
+  cancel-in-progress: false
+
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      - name: Skip if feed is already fresh (backup run only)
+        id: fresh
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ -f jobs.json ]; then
+            age=$(python3 - <<'PY'
+          import json, datetime
+          g = json.load(open("jobs.json"))["generated"].rstrip("Z")
+          d = datetime.datetime.utcnow() - datetime.datetime.fromisoformat(g)
+          print(int(d.total_seconds() // 3600))
+          PY
+            )
+            echo "feed age: ${age}h"
+            if [ "$age" -lt 3 ] && [ "${{ github.event.schedule }}" = "47 1 * * *" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - run: pip install python-jobspy
-      - run: python jobspy_fetch.py
-      - run: |
-          git config user.name "jobspy-bot"; git config user.email "bot@users.noreply.github.com"
-          git add jobs.json; git commit -m "jobs feed $(date -u +%F)" || echo "no change"; git push
+        if: steps.fresh.outputs.skip != 'true'
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install JobSpy
+        if: steps.fresh.outputs.skip != 'true'
+        run: pip install python-jobspy
+
+      - name: Fetch jobs (retry up to 3 times)
+        if: steps.fresh.outputs.skip != 'true'
+        run: |
+          for i in 1 2 3; do
+            python jobspy_fetch.py && break
+            echo "attempt $i failed, waiting 120s"; sleep 120
+          done
+          python - <<'PY'
+          import json
+          n = json.load(open("jobs.json"))["count"]
+          print("jobs:", n)
+          assert n >= 20, "feed too small, treating as failure"
+          PY
+
+      - name: Commit feed (and keepalive)
+        if: steps.fresh.outputs.skip != 'true'
+        run: |
+          git config user.name "jobspy-bot"
+          git config user.email "bot@users.noreply.github.com"
+          date -u +%FT%TZ > .keepalive
+          git add jobs.json .keepalive
+          git commit -m "jobs feed $(date -u +%F)" || echo "nothing to commit"
+          git pull --rebase origin "${GITHUB_REF_NAME}" || true
+          git push
